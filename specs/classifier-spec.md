@@ -91,10 +91,10 @@ the format below:" followed by the output format you chose.
 **What output format should you request from the LLM?**
 
 ```
-[blank — you need to parse the response in classify_episode(). What format
-makes parsing reliable? Think about: a single label on its own line?
-A structured format like "Label: X / Reasoning: Y"? JSON?
-What are the tradeoffs?]
+Return your answer as a JSON object with exactly these keys:
+{"label": "<one of interview, solo, panel, narrative>", "reasoning": "<one or two sentences>"}
+Return only the JSON, with no extra text.
+
 ```
 
 ---
@@ -102,8 +102,22 @@ What are the tradeoffs?]
 **Edge cases to handle in the prompt:**
 
 ```
-[blank — what if labeled_examples is empty? What if the description is very
-short? How does your prompt handle these?]
+- Empty labeled_examples: the prompt should still work as a zero-shot
+  classifier. Skip the examples section entirely (don't emit an empty
+  "Examples:" header), keep the task instruction and the four label
+  definitions, then present the episode to classify. The label
+  definitions carry the classification signal when no examples exist.
+
+- Very short or empty description: still build the prompt normally and
+  let the model pick the best-fit label from the four. Don't pad or
+  fabricate description text. ("unknown" is reserved for parse/API
+  failures, handled in classify_episode Step 5 — not a label the prompt
+  asks for.)
+
+- Extremely long labeled_examples list: optionally cap the number of
+  examples included (e.g., first N) so the prompt doesn't blow past the
+  token limit. Note the cap if you add one.
+
 ```
 
 ---
@@ -159,9 +173,18 @@ Extract the response text from:
 **Step 3 — Parse the response:**
 
 ```
-[blank — how do you extract the label and reasoning from the LLM's text output?
-What string operations or parsing logic do you need?
-This depends on the output format you chose in build_few_shot_prompt.]
+The prompt requests a JSON object, so parse with json.loads():
+
+  1. Strip whitespace from response.choices[0].message.content.
+  2. Models sometimes wrap JSON in ```json ... ``` fences or add stray
+     text. Defensively slice from the first "{" to the last "}" before
+     parsing (text[text.find("{"): text.rfind("}") + 1]).
+  3. Call json.loads() on that substring inside a try/except (see Step 5).
+  4. Read data["label"] and data["reasoning"]. Normalize the label with
+     .strip().lower() so casing/whitespace differences don't fail
+     validation in Step 4.
+  5. If a key is missing, treat it as an unparseable response and fall
+     through to the error path (label = "unknown").
 ```
 
 ---
@@ -169,8 +192,16 @@ This depends on the output format you chose in build_few_shot_prompt.]
 **Step 4 — Validate the label:**
 
 ```
-[blank — what do you do if the LLM returns a label that isn't in VALID_LABELS?
-What should label be set to?]
+After normalizing (.strip().lower()), check membership:
+
+  if label not in VALID_LABELS:
+      label = "unknown"
+
+This catches hallucinated labels, near-misses ("interviews", "monologue"),
+empty strings, and anything outside the four allowed values. Keep the
+reasoning text even when the label is invalid — it's useful for debugging
+why the model went off-taxonomy. VALID_LABELS stays the single source of
+truth, so adding a label later only requires updating that constant.
 ```
 
 ---
@@ -178,9 +209,22 @@ What should label be set to?]
 **Step 5 — Handle errors gracefully:**
 
 ```
-[blank — what could go wrong? (Network error? Unparseable response?)
-What should the function return if something fails?
-Hint: the evaluation loop runs 20 calls — one bad response shouldn't crash everything.]
+Wrap the API call and parsing in try/except so a single failure never
+crashes the 20-call evaluation loop. Things that can go wrong:
+
+  - Network / API error (timeout, rate limit, auth) from
+    _client.chat.completions.create()
+  - json.loads() raises ValueError on non-JSON or truncated output
+  - KeyError if "label" or "reasoning" is missing from the parsed dict
+
+On any failure, return a valid dict so the caller can keep going:
+
+  {"label": "unknown", "reasoning": f"error: {e}"}
+
+This guarantees the function ALWAYS returns the documented shape
+(keys "label" and "reasoning", label is a VALID_LABELS member or
+"unknown"). Optionally print/log the error so failures are visible
+during evaluation rather than silently counted as "unknown".
 ```
 
 ---
@@ -213,24 +257,36 @@ any labels you're unsure about. Annotation quality is part of the lab.
 **Test: what does the raw LLM response look like for one episode?**
 
 ```
-Episode tested: [title]
-Raw response text: [paste it here]
+Episode tested: [Five Writers on What It Means to Write for the Internet Now]
+Raw response text: [panel]
+Reasoning: [The episode features five writers discussing how the internet has changed what it means to publish writing, with a focus on their differing opinions and a frank conversation, indicating a panel format with multiple guests and roughly equal speaking time.]
 ```
 
 **How did you parse the label out of the response?**
 
 ```
-[describe the string operations — strip, split, lower, etc.]
+The prompt asks for a JSON object, so I parsed with json.loads():
+
+  1. Took response.choices[0].message.content and stripped whitespace.
+  2. Sliced from the first "{" to the last "}" (text[text.find("{"):
+     text.rfind("}") + 1]) to drop any ```json fences or stray text the
+     model added around the JSON.
+  3. json.loads() on that substring, inside a try/except.
+  4. Pulled data["label"] and data["reasoning"], then normalized the
+     label with .strip().lower() before the VALID_LABELS check.
+
+So the key string operations were: strip, find/rfind to isolate the
+JSON, json.loads to parse, and .strip().lower() to normalize the label.
 ```
 
 **Did any episodes return `"unknown"`? If so, why?**
 
 ```
-[yes / no — if yes, what did the raw response look like?]
+[no]
 ```
 
 **One thing about the output format that surprised you:**
 
 ```
-[your answer here]
+[nothing]
 ```

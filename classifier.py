@@ -55,7 +55,55 @@ def build_few_shot_prompt(labeled_examples: list[dict], description: str) -> str
 
     Before writing code, complete specs/classifier-spec.md.
     """
-    return ""
+    # Cap the number of examples so the prompt doesn't blow past the token limit.
+    MAX_EXAMPLES = 20
+
+    task_instruction = (
+        "You are classifying podcast episodes by their format. Classify the "
+        "episode into exactly one of these four labels:\n\n"
+        "- interview: a conversation between a host and one or more guests\n"
+        "- solo: a single host speaking from memory, experience, or opinion — "
+        "no guests, no assembled external sources\n"
+        "- panel: multiple guests with roughly equal speaking time, often "
+        "debating or discussing a topic together\n"
+        "- narrative: a story assembled from external sources — interviews, "
+        "archival audio, reporting — with a clear narrative arc\n\n"
+        "Return only the label and your reasoning. Do not explain the taxonomy."
+    )
+
+    output_format = (
+        'Return your answer as a JSON object with exactly these keys:\n'
+        '{"label": "<one of interview, solo, panel, narrative>", '
+        '"reasoning": "<one or two sentences>"}\n'
+        "Return only the JSON, with no extra text."
+    )
+
+    parts = [task_instruction]
+
+    # Examples section — skipped entirely when there are none (zero-shot).
+    if labeled_examples:
+        example_blocks = []
+        for ex in labeled_examples[:MAX_EXAMPLES]:
+            example_blocks.append(
+                f"Title: {ex['title']}\n"
+                f"Description: {ex['description']}\n"
+                f"Label: {ex['label']}"
+            )
+        parts.append("Examples:\n\n" + "\n\n---\n\n".join(example_blocks))
+
+    # The new episode to classify, in the same format but with the label withheld.
+    parts.append(
+        "Title: (the episode below)\n"
+        f"Description: {description}\n"
+        "Label: ?"
+    )
+
+    parts.append(
+        "Classify the episode above. Return your answer in the format below:\n\n"
+        + output_format
+    )
+
+    return "\n\n".join(parts)
 
 
 def classify_episode(description: str, labeled_examples: list[dict]) -> dict:
@@ -76,7 +124,34 @@ def classify_episode(description: str, labeled_examples: list[dict]) -> dict:
 
     Before writing code, complete specs/classifier-spec.md.
     """
-    return {
-        "label": None,
-        "reasoning": "Classifier not yet implemented. Complete Milestone 2.",
-    }
+    # Step 1 — Build the prompt.
+    prompt = build_few_shot_prompt(labeled_examples, description)
+
+    try:
+        # Step 2 — Send to the LLM.
+        response = _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+        )
+        text = response.choices[0].message.content.strip()
+
+        # Step 3 — Parse the response. Defensively slice to the JSON object in
+        # case the model wraps it in ```json fences or adds stray text.
+        json_text = text[text.find("{"): text.rfind("}") + 1]
+        data = json.loads(json_text)
+
+        label = data["label"].strip().lower()
+        reasoning = data["reasoning"]
+
+        # Step 4 — Validate the label.
+        if label not in VALID_LABELS:
+            label = "unknown"
+
+        return {"label": label, "reasoning": reasoning}
+
+    except Exception as e:
+        # Step 5 — Handle errors gracefully so one failure can't crash the
+        # evaluation loop (API errors, bad/truncated JSON, missing keys).
+        print(f"classify_episode error: {e}")
+        return {"label": "unknown", "reasoning": f"error: {e}"}
